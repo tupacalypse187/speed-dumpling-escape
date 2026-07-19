@@ -38,6 +38,7 @@ const INITIAL_HUD: HudState = {
   obbyReward: null,
   obbyTime: null,
   obbyBest: null,
+  practice: null,
   readyMult: null,
   lockedMult: { mult: 2, wins: 3 },
   rebirthReady: false,
@@ -357,7 +358,11 @@ function Hud(props: {
         </div>
         {hud.mode === 'obby' && (
           <div className="flex items-center gap-2 rounded-xl bg-[#7d6fd0]/80 px-3 py-1.5 text-sm font-black text-white backdrop-blur-sm">
-            {hud.obbyId === -1 ? (
+            {hud.obbyId === -2 ? (
+              <span>
+                🎯 Practice — drills {hud.practice?.done ?? 0}/{hud.practice?.total ?? 0} · free play, no rewards
+              </span>
+            ) : hud.obbyId === -1 ? (
               <span>⭐ Weekly Challenge — finish for big 🪙 (+2 🏆)</span>
             ) : (
               <span>{hud.obbyName} — reach the trophy! (+{fmt(hud.obbyReward ?? 0)} 🏆)</span>
@@ -365,9 +370,11 @@ function Hud(props: {
             <span className="rounded-lg bg-black/30 px-2 py-0.5 tabular-nums">
               ⏱ {hud.obbyTime != null ? fmtTime(hud.obbyTime) : '0.0s'}
             </span>
-            <span className="text-xs font-bold text-white/75">
-              {hud.obbyBest != null ? `best ${fmtTime(hud.obbyBest)}` : 'no record yet'}
-            </span>
+            {hud.obbyId !== -2 && (
+              <span className="text-xs font-bold text-white/75">
+                {hud.obbyBest != null ? `best ${fmtTime(hud.obbyBest)}` : 'no record yet'}
+              </span>
+            )}
             <span className="text-xs font-bold text-white/60">R = exit</span>
           </div>
         )}
@@ -667,6 +674,15 @@ function PauseMenu(props: {
               className={`rounded-lg px-3 py-1 font-black text-white ${settings.shake ? 'bg-[#8be06a]' : 'bg-[#b0b0bc]'}`}
             >
               {settings.shake ? 'ON' : 'OFF'}
+            </button>
+          </div>
+          <div className="flex items-center justify-between text-xs font-black text-[#7a5a45]">
+            <span>👻 Ghost replay</span>
+            <button
+              onClick={() => onSettings({ ...settings, ghost: !settings.ghost })}
+              className={`rounded-lg px-3 py-1 font-black text-white ${settings.ghost ? 'bg-[#8be06a]' : 'bg-[#b0b0bc]'}`}
+            >
+              {settings.ghost ? 'ON' : 'OFF'}
             </button>
           </div>
           <div className="flex items-center justify-between text-xs font-black text-[#7a5a45]">

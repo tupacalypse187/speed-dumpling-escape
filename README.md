@@ -44,7 +44,7 @@ starring a squishy soup dumpling with big dreams and little scurrying feet. 🥟
 - **Fair-by-construction difficulty** — gaps use 55–70% of your jump capability at the required level, machine-verified by `verifyObby()`. Challenge comes from spikes, movers and timing, never barely-makeable jumps.
 - **Breathing landing pads** — teal pads that grow and shrink (60%–130%) on gentle sine cycles with rippling glow. Collision tracks the animation every frame.
 - **Moving platforms, spikes, lava** — ride sine-wave movers, weave spike beds, and don't touch the bubbling lava.
-- **🎯 Practice mode** — a no-pressure training course with checkpoint flags and labeled drill sections. *(see roadmap)*
+- **🎯 Practice mode** — a no-pressure training course entered through the target arch in the hub. Four labeled drill sections (gaps, movers, spikes, breathing pads), checkpoint flags that flip green and become your respawn point, and zero rewards — pure free play. `R` exits anytime.
 
 ### ⭐ Weekly Challenge
 - A golden door with a spinning star and a live countdown.
@@ -74,7 +74,7 @@ Five unlockable companions with springy follow physics and passive bonuses:
 - **12 achievements** with toast popups (Speed Demon, Obby Master, Marathon…).
 - **Trophy Room** — lifetime stats, per-obby best times, weekly history, achievement gallery.
 - **NEW RECORD** celebrations with sound + toast when you beat a best time.
-- **Ghost replays** — race a translucent replay of your best run. *(see roadmap)*
+- **Ghost replays** — every non-practice run is recorded at 10 Hz; beat your best time and the new line is stored. Next attempt, a translucent cyan dumpling replays your record line so you can race yourself. Weekly ghosts are kept per week (old weeks pruned). Toggle in the pause menu.
 
 ### 🎨 Presentation
 - 100% canvas-rendered dumpling: squash-and-stretch, blinking, scurrying feet, animated pleats, hats, milestone skins, rebirth halo.
@@ -151,8 +151,8 @@ keep working across updates. Reset anytime from the title screen or pause menu.
 - [x] Pets, coins, shop, achievements, trophy room
 - [x] Weekly challenge courses
 - [x] Breathing landing pads + difficulty rebalance
-- [ ] 🎯 Practice mode (checkpoints + drill sections)
-- [ ] 👻 Ghost replays of your best runs
+- [x] 🎯 Practice mode (checkpoints + drill sections)
+- [x] 👻 Ghost replays of your best runs
 - [ ] More pets & hats
 - [ ] Mobile touch controls
 - [ ] Daily modifier mutators (low gravity, double coins…)

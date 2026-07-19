@@ -2,6 +2,7 @@ import { AudioManager } from './audio'
 import {
   GRAV,
   JUMP_V,
+  PRACTICE_OBBY,
   fmt,
   levelDefFor,
   levelForSpeed,
@@ -27,7 +28,7 @@ import {
 import { checkAchievements } from './achievements'
 import { petById, type PetDef, type PetUnlockCtx } from './pets'
 import { HATS, TRAILS, CHARM_BONUS, CHARM_MAX, charmPrice } from './shop'
-import { storeSave, fmtTime, type SaveData, type Settings } from './save'
+import { storeSave, fmtTime, type GhostSample, type SaveData, type Settings } from './save'
 
 export interface HudState {
   speed: number
@@ -51,6 +52,7 @@ export interface HudState {
   obbyReward: number | null
   obbyTime: number | null
   obbyBest: number | null
+  practice: { done: number; total: number } | null
   readyMult: number | null
   lockedMult: { mult: number; wins: number } | null
   rebirthReady: boolean
@@ -89,6 +91,7 @@ const TREADMILLS = [
 ]
 const SHOP_X = 262
 const SHRINE_X = 1470
+const PRACTICE_X = 1330
 const BUTTON_X = 1760
 const WEEKLY_X = 1930
 const GATE_0_X = 2140
@@ -200,6 +203,7 @@ export class Game {
   private equippedTrail: string
   private charms: number
   private weeklyBest: Record<string, number>
+  private ghosts: Record<string, GhostSample[]>
 
   // ---- player ----
   private px = HUB_SPAWN.x
@@ -235,6 +239,15 @@ export class Game {
   private obbyCoins: RuntimeCoin[] = []
   private weeklyMode = false
   private weeklyKey = ''
+  private practiceMode = false
+  private checkpointsTouched = new Set<number>()
+  private practiceRespawn = { x: 0, y: 0 }
+  // ghost replay: recording for the current run + playback of the stored best
+  private ghostRec: GhostSample[] = []
+  private ghostRecTimer = 0
+  private ghostPlay: GhostSample[] | null = null
+  private ghostIdx = 0
+  private ghostFxTimer = 0
 
   // ---- ceremony ----
   private ceremonyT = 0
@@ -292,6 +305,7 @@ export class Game {
     this.equippedTrail = save.equippedTrail
     this.charms = save.charms
     this.weeklyBest = { ...save.weeklyBest }
+    this.ghosts = { ...save.ghosts }
     this.audio = new AudioManager(save.muted, this.settings.musicVol, this.settings.sfxVol)
     this.prevLevel = levelForSpeed(this.speed).level
     for (let i = 0; i < 8; i++) {
@@ -621,6 +635,7 @@ export class Game {
       equippedTrail: this.equippedTrail,
       charms: this.charms,
       weeklyBest: { ...this.weeklyBest },
+      ghosts: { ...this.ghosts },
     }
   }
 
@@ -662,6 +677,10 @@ export class Game {
           ? (this.weeklyBest[this.weeklyKey] ?? null)
           : (this.bestTimes[String(this.obby.id)] ?? null)
         : null,
+      practice:
+        this.mode === 'obby' && this.practiceMode
+          ? { done: this.checkpointsTouched.size, total: this.obby?.checkpoints?.length ?? 0 }
+          : null,
       readyMult: tier && this.wins >= tier.wins ? tier.mult : null,
       lockedMult: tier && this.wins < tier.wins ? { mult: tier.mult, wins: tier.wins } : null,
       rebirthReady: lvl.level >= REBIRTH_REQ_LEVEL,
@@ -703,7 +722,7 @@ export class Game {
       this.addFloat(this.px, this.py - 90, `Requires Lv ${def.reqLevel}!`, '#e0444a', 22)
       return
     }
-    this.startObbyRun(def, false, '')
+    this.startObbyRun(def, 'normal', '')
   }
 
   private enterWeekly(): void {
@@ -716,14 +735,29 @@ export class Game {
       return
     }
     this.audio.click()
-    this.startObbyRun(def, true, key)
+    this.startObbyRun(def, 'weekly', key)
   }
 
-  private startObbyRun(def: ObbyDef, weekly: boolean, weekKey: string): void {
+  private enterPractice(): void {
+    this.audio.click()
+    this.startObbyRun(PRACTICE_OBBY, 'practice', '')
+  }
+
+  private startObbyRun(def: ObbyDef, kind: 'normal' | 'weekly' | 'practice', weekKey: string): void {
     this.mode = 'obby'
     this.obby = def
-    this.weeklyMode = weekly
+    this.weeklyMode = kind === 'weekly'
     this.weeklyKey = weekKey
+    this.practiceMode = kind === 'practice'
+    this.checkpointsTouched = new Set()
+    this.practiceRespawn = { ...def.start }
+    // ghost: record every run (except practice); play back the stored best
+    this.ghostRec = []
+    this.ghostRecTimer = 0
+    this.ghostIdx = 0
+    const ghostKey = kind === 'weekly' ? `w:${weekKey}` : String(def.id)
+    this.ghostPlay =
+      kind !== 'practice' && this.settings.ghost ? (this.ghosts[ghostKey] ?? null) : null
     this.movers = def.movers.map((m) => ({ def: m, cx: m.x, cy: m.y, px: m.x, py: m.y }))
     this.obbyCoins = def.coins.map((c) => ({ ...c, taken: false }))
     this.px = def.start.x
@@ -742,6 +776,9 @@ export class Game {
     this.obby = null
     this.weeklyMode = false
     this.weeklyKey = ''
+    this.practiceMode = false
+    this.ghostPlay = null
+    this.ghostRec = []
     this.movers = []
     this.obbyCoins = []
     this.standingMover = null
@@ -758,6 +795,22 @@ export class Game {
     if (!this.obby) return
     const runTime = this.time - this.obbyStartTime
 
+    if (this.practiceMode) {
+      // Free play: no rewards, no records — just a pat on the back
+      const total = this.obby.checkpoints?.length ?? 0
+      this.audio.win()
+      this.addFloat(this.px, this.py - 110, 'PRACTICE COMPLETE! 🎯', '#4ade80', 30)
+      this.cb.onToast({
+        icon: '🎯',
+        title: 'Practice run complete!',
+        desc: `Checkpoints ${this.checkpointsTouched.size}/${total} · ${fmtTime(runTime)} — no rewards in free play`,
+      })
+      this.winConfetti()
+      this.winTimer = 1.4
+      this.emitHud()
+      return
+    }
+
     if (this.weeklyMode) {
       // Weekly Challenge: coin payout (+ small fixed wins), weekly best-time record
       const lvl = levelForSpeed(this.speed).level
@@ -772,6 +825,12 @@ export class Game {
       const prevBest = this.weeklyBest[this.weeklyKey]
       if (prevBest == null || runTime < prevBest) {
         this.weeklyBest[this.weeklyKey] = runTime
+        // Keep the ghost for this week's best run; prune ghosts from past weeks
+        this.ghosts[`w:${this.weeklyKey}`] = [...this.ghostRec]
+        for (const k of Object.keys(this.ghosts)) {
+          if (k.startsWith('w:') && k !== `w:${this.weeklyKey}`) delete this.ghosts[k]
+        }
+        this.saveDirty = true
         if (prevBest != null) {
           this.audio.record()
           this.addFloat(this.px, this.py - 150, 'NEW RECORD!', '#ffd24a', 26)
@@ -802,6 +861,8 @@ export class Game {
     const prevBest = this.bestTimes[key]
     if (prevBest == null || runTime < prevBest) {
       this.bestTimes[key] = runTime
+      this.ghosts[key] = [...this.ghostRec]
+      this.saveDirty = true
       if (prevBest != null) {
         this.audio.record()
         this.addFloat(this.px, this.py - 150, 'NEW RECORD!', '#ffd24a', 26)
@@ -850,7 +911,12 @@ export class Game {
     this.audio.death()
     this.shake = 18
     this.spawnBurst(this.px, this.py - PLAYER_R, '#ffffff', 18)
-    const spawn = this.mode === 'obby' && this.obby ? this.obby.start : HUB_SPAWN
+    const spawn =
+      this.mode === 'obby' && this.practiceMode
+        ? this.practiceRespawn
+        : this.mode === 'obby' && this.obby
+          ? this.obby.start
+          : HUB_SPAWN
     this.px = spawn.x
     this.py = spawn.y
     this.pvx = 0
@@ -1067,6 +1133,10 @@ export class Game {
       this.activateMultiplier()
       return
     }
+    if (Math.abs(this.px - PRACTICE_X) < 60 && Math.abs(this.py - GROUND_Y) < 60) {
+      this.enterPractice()
+      return
+    }
     if (Math.abs(this.px - WEEKLY_X) < 80 && Math.abs(this.py - GROUND_Y) < 60) {
       this.enterWeekly()
       return
@@ -1192,6 +1262,37 @@ export class Game {
       const t = this.obby.trophy
       if (Math.abs(this.px - t.x) < 42 && Math.abs(this.py - t.y) < 80) {
         this.completeObby()
+      }
+
+      // Ghost recording (10 Hz) — skipped in practice mode
+      if (!this.practiceMode && this.ghostRec.length < 3000) {
+        this.ghostRecTimer += dt
+        while (this.ghostRecTimer >= 0.1 && this.ghostRec.length < 3000) {
+          this.ghostRecTimer -= 0.1
+          this.ghostRec.push([
+            Math.round((this.time - this.obbyStartTime) * 10) / 10,
+            Math.round(this.px),
+            Math.round(this.py),
+            this.faceDir,
+            this.grounded ? 0 : 1,
+          ])
+        }
+        if (this.ghostRec.length >= 3000) this.ghostRecTimer = 0
+      }
+
+      // Practice checkpoints
+      if (this.practiceMode && this.obby.checkpoints) {
+        for (let i = 0; i < this.obby.checkpoints.length; i++) {
+          if (this.checkpointsTouched.has(i)) continue
+          const c = this.obby.checkpoints[i]
+          if (Math.abs(this.px - c.x) < 50 && Math.abs(this.py - c.y) < 60) {
+            this.checkpointsTouched.add(i)
+            this.practiceRespawn = { x: c.x, y: c.y }
+            this.audio.coin()
+            this.addFloat(this.px, this.py - 60, 'CHECKPOINT!', '#4ade80', 22)
+            this.emitHud()
+          }
+        }
       }
     }
 
@@ -1658,6 +1759,7 @@ export class Game {
     }
 
     this.renderShrine(ctx)
+    this.renderPracticeDoor(ctx)
     this.renderHubButton(ctx)
     this.renderWeeklyDoor(ctx)
 
@@ -1913,6 +2015,58 @@ export class Game {
     ctx.fillText(`⏳ ${fmtCountdown(msUntilNextWeek())}`, gx, y - 238)
   }
 
+  private renderPracticeDoor(ctx: CanvasRenderingContext2D): void {
+    const x = PRACTICE_X
+    const y = GROUND_Y
+    // wooden posts + crossbar arch
+    ctx.fillStyle = '#8a5a33'
+    ctx.fillRect(x - 52, y - 150, 10, 150)
+    ctx.fillRect(x + 42, y - 150, 10, 150)
+    ctx.fillRect(x - 60, y - 166, 120, 18)
+    // hanging target: pulsing concentric rings
+    const pulse = 1 + Math.sin(this.time * 3) * 0.06
+    ctx.save()
+    ctx.translate(x, y - 96)
+    ctx.scale(pulse, pulse)
+    const rings: Array<[number, string]> = [
+      [34, '#e0444a'],
+      [26, '#fff3df'],
+      [18, '#e0444a'],
+      [10, '#fff3df'],
+      [4, '#e0444a'],
+    ]
+    for (const [r, color] of rings) {
+      ctx.fillStyle = color
+      ctx.beginPath()
+      ctx.arc(0, 0, r, 0, Math.PI * 2)
+      ctx.fill()
+    }
+    ctx.restore()
+    // rope from crossbar to target
+    ctx.strokeStyle = '#8a5a33'
+    ctx.lineWidth = 3
+    ctx.beginPath()
+    ctx.moveTo(x, y - 148)
+    ctx.lineTo(x, y - 96 - 34 * pulse)
+    ctx.stroke()
+    // soft green glow at the base
+    ctx.save()
+    ctx.globalAlpha = 0.35 + Math.sin(this.time * 2.4) * 0.1
+    ctx.fillStyle = '#8be06a'
+    ctx.beginPath()
+    ctx.ellipse(x, y - 4, 56, 10, 0, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+    // labels
+    ctx.textAlign = 'center'
+    ctx.fillStyle = '#7a4b1a'
+    ctx.font = 'black 18px system-ui, sans-serif'
+    ctx.fillText('🎯 PRACTICE', x, y - 182)
+    ctx.font = 'bold 12px system-ui, sans-serif'
+    ctx.fillStyle = '#2f9e44'
+    ctx.fillText('free play · no rewards · press E', x, y - 200)
+  }
+
   private renderObby(ctx: CanvasRenderingContext2D): void {
     const def = this.obby
     if (!def) return
@@ -2108,11 +2262,120 @@ export class Game {
     ctx.fillStyle = '#7a4b1a'
     ctx.font = 'bold 16px system-ui, sans-serif'
     ctx.textAlign = 'center'
-    ctx.fillText(`+${fmt(def.reward)} WINS!`, tx, t.y - 90)
+    ctx.fillText(this.practiceMode ? '🏁 FINISH' : `+${fmt(def.reward)} WINS!`, tx, t.y - 90)
 
     ctx.fillStyle = '#7a6a55'
     ctx.font = 'bold 14px system-ui, sans-serif'
     ctx.fillText('START (R = exit)', def.start.x + 60, 580)
+
+    // section labels (practice drills)
+    if (def.labels) {
+      ctx.textAlign = 'center'
+      for (const l of def.labels) {
+        ctx.font = 'black 22px system-ui, sans-serif'
+        ctx.fillStyle = 'rgba(90,60,30,0.85)'
+        ctx.fillText(l.text, l.x, l.y)
+      }
+    }
+
+    // checkpoint flags: gray until touched, then green with a wave
+    if (def.checkpoints) {
+      for (let i = 0; i < def.checkpoints.length; i++) {
+        const c = def.checkpoints[i]
+        const touched = this.checkpointsTouched.has(i)
+        ctx.fillStyle = '#8a5a33'
+        ctx.fillRect(c.x - 3, c.y - 90, 6, 90)
+        const wave = touched ? Math.sin(this.time * 6 + i) * 5 : 0
+        ctx.fillStyle = touched ? '#4ade80' : '#b8b8c4'
+        ctx.beginPath()
+        ctx.moveTo(c.x + 3, c.y - 90)
+        ctx.lineTo(c.x + 46, c.y - 78 + wave)
+        ctx.lineTo(c.x + 3, c.y - 62)
+        ctx.closePath()
+        ctx.fill()
+        if (touched) {
+          ctx.fillStyle = '#166534'
+          ctx.font = 'bold 13px system-ui, sans-serif'
+          ctx.textAlign = 'center'
+          ctx.fillText('✓', c.x + 20, c.y - 68 + wave * 0.5)
+        }
+      }
+    }
+
+    this.renderGhost(ctx)
+  }
+
+  // Best-run ghost: cyan translucent dumpling replaying the recorded line.
+  private renderGhost(ctx: CanvasRenderingContext2D): void {
+    const g = this.ghostPlay
+    if (!g || g.length === 0 || this.mode !== 'obby') return
+    const runT = this.time - this.obbyStartTime
+    if (runT < g[0][0]) return
+    while (this.ghostIdx < g.length - 1 && g[this.ghostIdx + 1][0] <= runT) this.ghostIdx++
+    const a = g[this.ghostIdx]
+    const b = g[Math.min(this.ghostIdx + 1, g.length - 1)]
+    const span = b[0] - a[0]
+    const f = span > 0 ? clamp((runT - a[0]) / span, 0, 1) : 0
+    const gx = a[1] + (b[1] - a[1]) * f
+    const gy = a[2] + (b[2] - a[2]) * f
+    const facing = b[3] >= 0 ? 1 : -1
+    const airborne = b[4] === 1
+
+    // faint cyan trail behind the ghost
+    if (this.time - this.ghostFxTimer > 0.09 && Math.abs(b[1] - a[1]) > 2) {
+      this.ghostFxTimer = this.time
+      this.pushParticle({
+        x: gx,
+        y: gy - PLAYER_R,
+        vx: -facing * 30,
+        vy: 0,
+        life: 0,
+        max: 0.45,
+        size: 4,
+        color: 'rgba(103,232,249,0.55)',
+        grav: 0,
+      })
+    }
+
+    ctx.save()
+    ctx.globalAlpha = 0.35
+    ctx.translate(gx, gy)
+    ctx.scale(facing, 1)
+    if (airborne) ctx.scale(0.92, 1.1)
+    // dumpling body
+    const r = PLAYER_R
+    ctx.fillStyle = '#67e8f9'
+    ctx.beginPath()
+    ctx.moveTo(-r, 0)
+    ctx.quadraticCurveTo(-r, -r * 1.35, 0, -r * 1.35)
+    ctx.quadraticCurveTo(r, -r * 1.35, r, 0)
+    ctx.closePath()
+    ctx.fill()
+    // pleat lines
+    ctx.strokeStyle = 'rgba(14,116,144,0.8)'
+    ctx.lineWidth = 2
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath()
+      ctx.moveTo(i * r * 0.4, -r * 1.3)
+      ctx.quadraticCurveTo(i * r * 0.55, -r * 0.8, i * r * 0.5, -r * 0.45)
+      ctx.stroke()
+    }
+    // eyes
+    ctx.fillStyle = '#0e7490'
+    ctx.beginPath()
+    ctx.arc(r * 0.28, -r * 0.62, 2.6, 0, Math.PI * 2)
+    ctx.arc(r * 0.72, -r * 0.62, 2.6, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+
+    // "GHOST" tag
+    ctx.save()
+    ctx.globalAlpha = 0.5
+    ctx.fillStyle = '#0e7490'
+    ctx.font = 'bold 11px system-ui, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillText('👻 BEST', gx, gy - PLAYER_R * 1.7)
+    ctx.restore()
   }
 
   private renderRings(ctx: CanvasRenderingContext2D): void {

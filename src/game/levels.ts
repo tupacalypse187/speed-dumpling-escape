@@ -176,6 +176,9 @@ export interface ObbyDef {
   hazards: Hazard[]
   trophy: { x: number; y: number }
   coins: Array<{ x: number; y: number }>
+  /** practice mode: labeled drill sections + checkpoint flags */
+  labels?: Array<{ x: number; y: number; text: string }>
+  checkpoints?: Array<{ x: number; y: number }>
 }
 
 const LAVA_H = 300
@@ -335,3 +338,66 @@ export const OBBIES: ObbyDef[] = [
     ],
   ),
 ]
+
+/**
+ * Practice mode course (id -2): a mashup training ground with labeled drill
+ * sections and checkpoint flags. Gaps ≤ ~150px so even a speed-0 dumpling
+ * (jump ≈ 180px) can train comfortably. No rewards — pure practice.
+ */
+export const PRACTICE_OBBY: ObbyDef = {
+  id: -2,
+  name: 'Practice',
+  reqLevel: 0,
+  reward: 0,
+  color: '#7ee0d2',
+  skyTop: '#c9f7ef',
+  skyBottom: '#fff3d1',
+  width: 6220,
+  generated: false,
+  start: { x: 120, y: 620 },
+  platforms: [
+    { x: -100, y: 620, w: 520, h: 40 },
+    // gap drill
+    { x: 560, y: 590, w: 200, h: 32 },
+    { x: 900, y: 570, w: 200, h: 32 },
+    { x: 1240, y: 550, w: 200, h: 32 },
+    { x: 1580, y: 620, w: 320, h: 40 }, // checkpoint 1
+    // mover drill
+    { x: 2440, y: 560, w: 220, h: 32 },
+    { x: 3040, y: 620, w: 360, h: 40 }, // checkpoint 2
+    // spike drill
+    { x: 3540, y: 580, w: 240, h: 32 },
+    { x: 3920, y: 560, w: 240, h: 32 },
+    { x: 4300, y: 620, w: 320, h: 40 }, // checkpoint 3
+    // pad drill
+    { x: 5640, y: 620, w: 520, h: 40 }, // checkpoint 4 + trophy
+  ],
+  pads: [
+    { x: 4760, y: 570, w: 220, h: 26, phase: 0.4, speed: 1.4 },
+    { x: 5040, y: 540, w: 220, h: 26, phase: 2.2, speed: 1.6 },
+    { x: 5320, y: 580, w: 220, h: 26, phase: 4.1, speed: 1.3 },
+  ],
+  movers: [
+    { x: 2050, y: 560, w: 120, h: 24, axis: 'x', range: 120, speed: 1.5 },
+    { x: 2800, y: 520, w: 120, h: 24, axis: 'y', range: 110, speed: 1.8, phase: 1 },
+  ],
+  hazards: [
+    { x: 3640, y: 580, w: 60, h: 22, type: 'spikes' },
+    { x: 4000, y: 560, w: 60, h: 22, type: 'spikes' },
+    { x: -400, y: 800, w: 6220 + 800, h: 300, type: 'lava' },
+  ],
+  trophy: { x: 5900, y: 620 },
+  coins: [],
+  labels: [
+    { x: 250, y: 480, text: '🏁 GAP DRILL' },
+    { x: 1650, y: 480, text: '↔ MOVER DRILL' },
+    { x: 3150, y: 480, text: '🔺 SPIKE DRILL' },
+    { x: 4400, y: 480, text: '🫧 PAD DRILL' },
+  ],
+  checkpoints: [
+    { x: 1700, y: 620 },
+    { x: 3200, y: 620 },
+    { x: 4450, y: 620 },
+    { x: 5750, y: 620 },
+  ],
+}

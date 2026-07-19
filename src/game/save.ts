@@ -1,14 +1,19 @@
 /**
- * Save v4 — migrates gracefully from v1 ({speed, wins, mult, muted}),
- * v2 (+ rebirths, records, achievements, settings)
- * and v3 (+ pets, coins, cosmetics). v4 adds weeklyBest.
+ * Save v5 — migrates gracefully from v1 ({speed, wins, mult, muted}),
+ * v2 (+ rebirths, records, achievements, settings),
+ * v3 (+ pets, coins, cosmetics), v4 (+ weeklyBest).
+ * v5 adds ghost replays + the ghost visibility setting.
  */
+
+/** Ghost replay sample: [t, x, y, facing, airborne] recorded at ~10Hz. */
+export type GhostSample = [number, number, number, number, number]
 
 export interface Settings {
   musicVol: number // 0..1
   sfxVol: number // 0..1
   shake: boolean
   particles: 'high' | 'low'
+  ghost: boolean
 }
 
 export interface SaveData {
@@ -34,6 +39,8 @@ export interface SaveData {
   charms: number
   // v4: weekly challenge (weekKey -> best seconds; key presence = completed that week)
   weeklyBest: Record<string, number>
+  // v5: ghost replays for current bests (obby id, or "w:<weekKey>" for weekly)
+  ghosts: Record<string, GhostSample[]>
 }
 
 const KEY = 'speed-dumpling-escape-save-v1' // same key; shape migrated in place
@@ -43,6 +50,7 @@ export const DEFAULT_SETTINGS: Settings = {
   sfxVol: 1,
   shake: true,
   particles: 'high',
+  ghost: true,
 }
 
 export const DEFAULT_SAVE: SaveData = {
@@ -66,6 +74,7 @@ export const DEFAULT_SAVE: SaveData = {
   equippedTrail: 'default',
   charms: 0,
   weeklyBest: {},
+  ghosts: {},
 }
 
 function num(v: unknown, fallback: number): number {
@@ -99,6 +108,7 @@ export function loadSave(): SaveData {
         sfxVol: num(p.settings?.sfxVol, DEFAULT_SETTINGS.sfxVol),
         shake: typeof p.settings?.shake === 'boolean' ? p.settings.shake : true,
         particles: p.settings?.particles === 'low' ? 'low' : 'high',
+        ghost: typeof p.settings?.ghost === 'boolean' ? p.settings.ghost : true,
       },
       coins: num(p.coins, 0),
       equippedPet: typeof p.equippedPet === 'string' ? p.equippedPet : null,
@@ -110,6 +120,10 @@ export function loadSave(): SaveData {
       weeklyBest:
         p.weeklyBest && typeof p.weeklyBest === 'object'
           ? (p.weeklyBest as Record<string, number>)
+          : {},
+      ghosts:
+        p.ghosts && typeof p.ghosts === 'object'
+          ? (p.ghosts as Record<string, GhostSample[]>)
           : {},
     }
   } catch {
