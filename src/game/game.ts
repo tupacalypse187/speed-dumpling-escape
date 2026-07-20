@@ -6,6 +6,7 @@ import {
   fmt,
   levelDefFor,
   levelForSpeed,
+  medalTimes,
   nextLevelFor,
   nextMultTier,
   padScale,
@@ -16,6 +17,7 @@ import {
   type ObbyDef,
 } from './levels'
 import { getObby } from './generator'
+import { makePracticeSegment } from './practice'
 import {
   WEEKLY_WIN_REWARD,
   currentWeekKey,
@@ -52,7 +54,11 @@ export interface HudState {
   obbyReward: number | null
   obbyTime: number | null
   obbyBest: number | null
-  practice: { done: number; total: number } | null
+  /** medal time goals for the current obby run (null in weekly/practice) */
+  obbyGoals: { target: number; stretch: number } | null
+  /** medals already earned on the current obby (0–3; null outside normal obbies) */
+  obbyMedals: number | null
+  practice: { checkpoints: number; segment: number } | null
   readyMult: number | null
   lockedMult: { mult: number; wins: number } | null
   rebirthReady: boolean
@@ -98,6 +104,13 @@ const GATE_0_X = 2140
 const GATE_STEP = 300
 const GROUND_ROW_GATES = 6 // gates 0–5 on the ground, 6+ up on the arcade deck
 const DECK_Y = 445
+
+// treadmill rides: conveyor carry + drop-off speed bonus
+const CONVEYOR_SPEED = 260 // px/s
+const RIDE_BONUS = 25 // × full gain multiplier, awarded once per ride
+const RIDE_COOLDOWN = 1 // s before the same treadmill can pay again
+/** Passive (grass) tick gains use at most this much of the gain multiplier. */
+const GRASS_GAIN_CAP = 3
 
 /**
  * Two-row door arcade: first GROUND_ROW_GATES doors along the ground,
@@ -204,6 +217,7 @@ export class Game {
   private charms: number
   private weeklyBest: Record<string, number>
   private ghosts: Record<string, GhostSample[]>
+  private medals: Record<string, number>
 
   // ---- player ----
   private px = HUB_SPAWN.x
@@ -248,6 +262,14 @@ export class Game {
   private ghostPlay: GhostSample[] | null = null
   private ghostIdx = 0
   private ghostFxTimer = 0
+  // treadmill rides
+  private ridingIdx = -1 // treadmill index currently carrying the player
+  private rideCooldown = 0
+  // infinite practice: appended segment count + current world end
+  private practiceSegments = 0
+  private practiceEndX = 0
+  private practiceEndY = 620
+  private practiceEndShrink = 0
 
   // ---- ceremony ----
   private ceremonyT = 0
@@ -306,6 +328,7 @@ export class Game {
     this.charms = save.charms
     this.weeklyBest = { ...save.weeklyBest }
     this.ghosts = { ...save.ghosts }
+    this.medals = { ...save.medals }
     this.audio = new AudioManager(save.muted, this.settings.musicVol, this.settings.sfxVol)
     this.prevLevel = levelForSpeed(this.speed).level
     for (let i = 0; i < 8; i++) {
@@ -636,6 +659,7 @@ export class Game {
       charms: this.charms,
       weeklyBest: { ...this.weeklyBest },
       ghosts: { ...this.ghosts },
+      medals: { ...this.medals },
     }
   }
 
@@ -679,7 +703,15 @@ export class Game {
         : null,
       practice:
         this.mode === 'obby' && this.practiceMode
-          ? { done: this.checkpointsTouched.size, total: this.obby?.checkpoints?.length ?? 0 }
+          ? { checkpoints: this.checkpointsTouched.size, segment: this.practiceSegments }
+          : null,
+      obbyGoals:
+        this.mode === 'obby' && this.obby && !this.practiceMode && !this.weeklyMode
+          ? medalTimes(this.obby)
+          : null,
+      obbyMedals:
+        this.mode === 'obby' && this.obby && !this.practiceMode && !this.weeklyMode
+          ? (this.medals[String(this.obby.id)] ?? 0)
           : null,
       readyMult: tier && this.wins >= tier.wins ? tier.mult : null,
       lockedMult: tier && this.wins < tier.wins ? { mult: tier.mult, wins: tier.wins } : null,
@@ -714,12 +746,18 @@ export class Game {
 
   // ---------------- world switching ----------------
 
+  /** Obby 1 is always open; obby N requires all 3 medals on obby N-1. */
+  private isObbyUnlocked(index: number): boolean {
+    if (index === 0) return true
+    return (this.medals[String(index)] ?? 0) >= 3
+  }
+
   private enterObby(index: number): void {
     const def = getObby(index + 1)
-    if (levelForSpeed(this.speed).level < def.reqLevel) {
+    if (!this.isObbyUnlocked(index)) {
       this.audio.denied()
       this.shake = Math.max(this.shake, 6)
-      this.addFloat(this.px, this.py - 90, `Requires Lv ${def.reqLevel}!`, '#e0444a', 22)
+      this.addFloat(this.px, this.py - 90, `Earn 🥉🥈🥇 on Obby ${index} first!`, '#e0444a', 20)
       return
     }
     this.startObbyRun(def, 'normal', '')
@@ -745,12 +783,20 @@ export class Game {
 
   private startObbyRun(def: ObbyDef, kind: 'normal' | 'weekly' | 'practice', weekKey: string): void {
     this.mode = 'obby'
-    this.obby = def
+    // practice world gets mutated as infinite segments append — work on a clone
+    this.obby = kind === 'practice' ? structuredClone(def) : def
     this.weeklyMode = kind === 'weekly'
     this.weeklyKey = weekKey
     this.practiceMode = kind === 'practice'
     this.checkpointsTouched = new Set()
     this.practiceRespawn = { ...def.start }
+    this.practiceSegments = 0
+    if (kind === 'practice') {
+      // world tail: last hand-built platform ends at x=6100 (y=620, static)
+      this.practiceEndX = 6100
+      this.practiceEndY = 620
+      this.practiceEndShrink = 0
+    }
     // ghost: record every run (except practice); play back the stored best
     this.ghostRec = []
     this.ghostRecTimer = 0
@@ -758,8 +804,8 @@ export class Game {
     const ghostKey = kind === 'weekly' ? `w:${weekKey}` : String(def.id)
     this.ghostPlay =
       kind !== 'practice' && this.settings.ghost ? (this.ghosts[ghostKey] ?? null) : null
-    this.movers = def.movers.map((m) => ({ def: m, cx: m.x, cy: m.y, px: m.x, py: m.y }))
-    this.obbyCoins = def.coins.map((c) => ({ ...c, taken: false }))
+    this.movers = this.obby.movers.map((m) => ({ def: m, cx: m.x, cy: m.y, px: m.x, py: m.y }))
+    this.obbyCoins = this.obby.coins.map((c) => ({ ...c, taken: false }))
     this.px = def.start.x
     this.py = def.start.y
     this.pvx = 0
@@ -791,25 +837,39 @@ export class Game {
     this.emitHud()
   }
 
+  /** Infinite practice: append the next seeded segment (checkpoint at its start). */
+  private extendPractice(): void {
+    const def = this.obby
+    if (!def || !this.practiceMode) return
+    this.practiceSegments++
+    const seg = makePracticeSegment(
+      this.practiceSegments,
+      this.practiceEndX,
+      this.practiceEndY,
+      this.practiceEndShrink,
+    )
+    def.platforms.push(...seg.platforms)
+    def.pads.push(...seg.pads)
+    def.movers.push(...seg.movers)
+    this.movers.push(...seg.movers.map((m) => ({ def: m, cx: m.x, cy: m.y, px: m.x, py: m.y })))
+    // insert spikes before the trailing lava sheet, then stretch the lava
+    def.hazards.splice(def.hazards.length - 1, 0, ...seg.hazards)
+    def.checkpoints = def.checkpoints ?? []
+    def.checkpoints.push(seg.checkpoint)
+    def.labels = def.labels ?? []
+    def.labels.push({ x: seg.checkpoint.x, y: 480, text: `SEGMENT ${this.practiceSegments}` })
+    this.practiceEndX = seg.endX
+    this.practiceEndY = seg.endY
+    this.practiceEndShrink = seg.endShrink
+    def.width = seg.endX + 500
+    const lava = def.hazards[def.hazards.length - 1]
+    if (lava.type === 'lava') lava.w = def.width + 800
+    this.emitHud()
+  }
+
   private completeObby(): void {
     if (!this.obby) return
     const runTime = this.time - this.obbyStartTime
-
-    if (this.practiceMode) {
-      // Free play: no rewards, no records — just a pat on the back
-      const total = this.obby.checkpoints?.length ?? 0
-      this.audio.win()
-      this.addFloat(this.px, this.py - 110, 'PRACTICE COMPLETE! 🎯', '#4ade80', 30)
-      this.cb.onToast({
-        icon: '🎯',
-        title: 'Practice run complete!',
-        desc: `Checkpoints ${this.checkpointsTouched.size}/${total} · ${fmtTime(runTime)} — no rewards in free play`,
-      })
-      this.winConfetti()
-      this.winTimer = 1.4
-      this.emitHud()
-      return
-    }
 
     if (this.weeklyMode) {
       // Weekly Challenge: coin payout (+ small fixed wins), weekly best-time record
@@ -874,11 +934,39 @@ export class Game {
       }
     }
 
+    // Medals: 🥉 finish · 🥈 under target · 🥇 under stretch (one-time each)
+    const goals = medalTimes(this.obby)
+    const earnedNow =
+      1 + (runTime <= goals.target ? 1 : 0) + (runTime <= goals.stretch ? 1 : 0)
+    const prevMedals = this.medals[key] ?? 0
+    const newMedals = Math.max(0, Math.min(3, earnedNow) - prevMedals)
+    if (newMedals > 0) {
+      this.medals[key] = Math.min(3, earnedNow)
+      this.wins += newMedals
+      this.saveDirty = true
+      this.audio.record()
+      const icons = ['🥉', '🥈', '🥇']
+      const names = ['BRONZE', 'SILVER', 'GOLD']
+      for (let m = prevMedals; m < prevMedals + newMedals; m++) {
+        this.addFloat(this.px, this.py - 140 - (m - prevMedals) * 30, `${icons[m]} ${names[m]} MEDAL +1 🏆`, '#ffd24a', 26)
+      }
+      this.cb.onToast({
+        icon: icons[this.medals[key] - 1],
+        title: `${names[this.medals[key] - 1]} medal earned!`,
+        desc: `${this.obby.name} — ${this.medals[key]}/3 medals${this.medals[key] >= 3 ? ' · next obby unlocked!' : ''}`,
+      })
+    }
+    // Frontier unlock: 3 medals on this obby opens the next door
+    if ((this.medals[key] ?? 0) >= 3 && id === this.maxObbyCompleted) {
+      const gp = gatePos(id)
+      this.spawnBurst(gp.x, gp.y - 80, '#ffd24a', 40)
+    }
+
     if (id >= this.maxObbyCompleted) {
       this.maxObbyCompleted = id
       const gp = gatePos(id)
       this.spawnBurst(gp.x, gp.y - 80, '#ffd24a', 40)
-      this.cb.onToast({ icon: '🔓', title: `Obby ${id + 1} gate revealed!`, desc: 'A new challenge awaits in the hub' })
+      this.cb.onToast({ icon: '🔓', title: `Obby ${id + 1} gate revealed!`, desc: 'Earn all 🥉🥈🥇 here to unlock it' })
     }
 
     this.winConfetti()
@@ -1028,18 +1116,67 @@ export class Game {
     this.updateFx(dt)
     this.updateCamera(dt)
 
-    // treadmill ticks (steam sprite auto-collects within radius)
+    // treadmill rides: stand on a belt and it carries you to the end,
+    // where it pays +RIDE_BONUS × full gain multiplier (once per ride)
+    if (this.mode === 'hub') {
+      this.rideCooldown = Math.max(0, this.rideCooldown - dt)
+      const beltIdx = this.treadmillIndex()
+      if (this.ridingIdx >= 0 && (!this.grounded || beltIdx < 0)) {
+        this.ridingIdx = -1 // jumped off mid-ride: no bonus, can re-step later
+      }
+      if (this.ridingIdx < 0 && beltIdx >= 0 && this.grounded && this.rideCooldown <= 0) {
+        this.ridingIdx = beltIdx
+        this.addFloat(this.px, this.py - PLAYER_R * 2 - 10, '🎢 riding!', '#6cc4ff', 16)
+      }
+      if (this.ridingIdx >= 0) {
+        const belt = TREADMILLS[this.ridingIdx]
+        this.px += CONVEYOR_SPEED * dt
+        // riding sparkles
+        if (Math.random() < 14 * dt * this.particleMul) {
+          this.pushParticle({
+            x: this.px + (Math.random() * 40 - 20),
+            y: this.py - Math.random() * PLAYER_R * 2,
+            vx: -40 - Math.random() * 40,
+            vy: -20 - Math.random() * 30,
+            life: 0,
+            max: 0.5,
+            size: 2.5 + Math.random() * 2.5,
+            color: Math.random() < 0.5 ? '#aee9ff' : '#fff7ae',
+            grav: 0,
+          })
+        }
+        if (this.px >= belt.x + belt.w + 2) {
+          // drop-off: pay the ride bonus at the FULL multiplier
+          const bonus = Math.round(RIDE_BONUS * this.gainValue)
+          this.speed += bonus
+          this.highestSpeed = Math.max(this.highestSpeed, this.speed)
+          this.saveDirty = true
+          this.audio.whoosh()
+          this.addFloat(this.px, this.py - PLAYER_R * 2 - 16, `+${fmt(bonus)} ⚡`, '#2f9e44', 30)
+          this.spawnBurst(this.px, this.py - PLAYER_R, '#aee9ff', 14)
+          this.ridingIdx = -1
+          this.rideCooldown = RIDE_COOLDOWN
+          this.levelUpCheck()
+          this.emitHud()
+        }
+      }
+    } else {
+      this.ridingIdx = -1
+    }
+
+    // grass running ticks — passive gain capped at ×GRASS_GAIN_CAP of the
+    // multiplier (rides + medals are the fast path now)
     const pet = this.petDef
     const autoTick =
       pet?.autoTickRadius != null &&
       Math.abs(this.py - GROUND_Y) < 170 &&
       TREADMILLS.some((t) => Math.abs(this.px - (t.x + t.w / 2)) < pet.autoTickRadius!)
-    const manualTick = this.onTreadmill() && this.moveDir !== 0
+    const manualTick = !this.onTreadmill() && this.moveDir !== 0
     if (this.mode === 'hub' && this.grounded && (manualTick || autoTick)) {
       this.tickTimer += dt
       if (this.tickTimer >= TICK_EVERY) {
         this.tickTimer -= TICK_EVERY
-        const g = this.gainValue
+        const g = Math.min(this.gainValue, GRASS_GAIN_CAP)
         this.speed += g
         this.highestSpeed = Math.max(this.highestSpeed, this.speed)
         this.saveDirty = true
@@ -1115,8 +1252,13 @@ export class Game {
   }
 
   private onTreadmill(): boolean {
-    if (Math.abs(this.py - GROUND_Y) > 4) return false
-    return TREADMILLS.some((t) => this.px > t.x && this.px < t.x + t.w)
+    return this.treadmillIndex() >= 0
+  }
+
+  /** Index of the treadmill the player is standing on (hub ground only). */
+  private treadmillIndex(): number {
+    if (this.mode !== 'hub' || Math.abs(this.py - GROUND_Y) > 4) return -1
+    return TREADMILLS.findIndex((t) => this.px > t.x && this.px < t.x + t.w)
   }
 
   private tryInteract(): void {
@@ -1259,9 +1401,15 @@ export class Game {
     }
 
     if (this.mode === 'obby' && this.obby && this.winTimer < 0) {
+      // practice never ends: no trophy, just ever more segments
       const t = this.obby.trophy
-      if (Math.abs(this.px - t.x) < 42 && Math.abs(this.py - t.y) < 80) {
+      if (!this.practiceMode && Math.abs(this.px - t.x) < 42 && Math.abs(this.py - t.y) < 80) {
         this.completeObby()
+      }
+
+      // Infinite practice: append the next seeded segment before the tail
+      if (this.practiceMode && this.px > this.obby.width - 900) {
+        this.extendPractice()
       }
 
       // Ghost recording (10 Hz) — skipped in practice mode
@@ -1753,7 +1901,7 @@ export class Game {
       ctx.fillStyle = '#7a4b2a'
       ctx.font = 'bold 16px system-ui, sans-serif'
       ctx.textAlign = 'center'
-      ctx.fillText('⚡ TREADMILL — run here!', t.x + t.w / 2, y - 64)
+      ctx.fillText('🎢 TREADMILL — hop on, ride for +25⚡!', t.x + t.w / 2, y - 64)
       ctx.fillStyle = '#a9703f'
       ctx.fillRect(t.x + t.w / 2 - 4, y - 60, 8, 44)
     }
@@ -1778,7 +1926,7 @@ export class Game {
 
     for (let i = 0; i < this.gateCount; i++) {
       const gp = gatePos(i)
-      this.renderGate(ctx, gp.x, gp.y, getObby(i + 1), i + 1 > this.maxObbyCompleted + 1)
+      this.renderGate(ctx, gp.x, gp.y, getObby(i + 1), i)
     }
 
     // spawn flag
@@ -1906,17 +2054,39 @@ export class Game {
     ctx.fillText(label, x, y - 64)
   }
 
+  /** Draw centered text, shrinking the font (never growing) until it fits maxW. */
+  private fitText(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    x: number,
+    y: number,
+    maxW: number,
+    weight: string,
+    baseSize: number,
+    minSize = 9,
+  ): void {
+    let size = baseSize
+    ctx.font = `${weight} ${size}px system-ui, sans-serif`
+    while (size > minSize && ctx.measureText(text).width > maxW) {
+      size--
+      ctx.font = `${weight} ${size}px system-ui, sans-serif`
+    }
+    ctx.fillText(text, x, y)
+  }
+
   private renderGate(
     ctx: CanvasRenderingContext2D,
     gx: number,
     gy: number,
     def: ObbyDef,
-    isFrontier: boolean,
+    index: number,
   ): void {
     const y = gy
     const w = 96
     const doorColor = levelDefFor(def.reqLevel).color
-    const unlocked = levelForSpeed(this.speed).level >= def.reqLevel
+    const unlocked = this.isObbyUnlocked(index)
+    const earned = this.medals[String(def.id)] ?? 0
+    const goals = medalTimes(def)
     ctx.fillStyle = '#8a6b4f'
     ctx.fillRect(gx - w / 2 - 8, y - 150, 16, 150)
     ctx.fillRect(gx + w / 2 - 8, y - 150, 16, 150)
@@ -1940,7 +2110,8 @@ export class Game {
       ctx.stroke()
       ctx.restore()
     }
-    if (isFrontier) {
+    // gold pulsing frame while this door is the unlockable frontier
+    if (!unlocked && index > 0 && (this.medals[String(index)] ?? 0) > 0) {
       ctx.save()
       ctx.globalAlpha = 0.6 + Math.sin(this.time * 4) * 0.3
       ctx.strokeStyle = '#ffd24a'
@@ -1949,17 +2120,43 @@ export class Game {
       ctx.stroke()
       ctx.restore()
     }
+    // signage — uniform base sizes on every door, shrunk to fit wide text
     ctx.textAlign = 'center'
+    // medal status row (earned = bright, missing = faint)
+    ctx.font = '15px system-ui, sans-serif'
+    const medalIcons = ['🥉', '🥈', '🥇']
+    for (let m = 0; m < 3; m++) {
+      ctx.save()
+      ctx.globalAlpha = m < earned ? 1 : 0.22
+      ctx.fillText(medalIcons[m], gx - 22 + m * 22, y - 232)
+      ctx.restore()
+    }
     ctx.fillStyle = '#5b3a1e'
-    ctx.font = 'black 22px system-ui, sans-serif'
-    ctx.fillText(def.name.toUpperCase(), gx, y - 186)
-    ctx.font = 'bold 15px system-ui, sans-serif'
+    this.fitText(ctx, def.name.toUpperCase(), gx, y - 210, 150, 'black', 20)
     if (unlocked) {
       ctx.fillStyle = '#2f9e44'
-      ctx.fillText(`Lv ${def.reqLevel} · 🏆 +${fmt(def.reward)} · press E`, gx, y - 208)
+      this.fitText(
+        ctx,
+        `+${fmt(def.reward)}🏆 · 🥈${fmtTime(goals.target)} · 🥇${fmtTime(goals.stretch)}`,
+        gx,
+        y - 190,
+        175,
+        'bold',
+        13,
+      )
+      ctx.fillStyle = 'rgba(91,58,30,0.85)'
+      this.fitText(ctx, 'press E', gx, y - 12, 80, 'bold', 12)
     } else {
       ctx.fillStyle = '#e0444a'
-      ctx.fillText(`🔒 Needs Lv ${def.reqLevel} · +${fmt(def.reward)}🏆`, gx, y - 208)
+      this.fitText(
+        ctx,
+        index === 0 ? '' : `🔒 3 medals on Obby ${index} · +${fmt(def.reward)}🏆`,
+        gx,
+        y - 190,
+        175,
+        'bold',
+        13,
+      )
       ctx.font = '30px system-ui, sans-serif'
       ctx.fillText('🔒', gx, y - 70)
     }
@@ -2210,63 +2407,69 @@ export class Game {
       ctx.restore()
     }
 
-    // trophy with spinning shine
-    const t = def.trophy
-    const bob = Math.sin(this.time * 3) * 6
-    const tx = t.x
-    const ty = t.y - 34 + bob
-    ctx.save()
-    ctx.translate(tx, ty)
-    ctx.fillStyle = '#ffd24a'
-    ctx.beginPath()
-    ctx.moveTo(-16, -14)
-    ctx.lineTo(16, -14)
-    ctx.quadraticCurveTo(16, 10, 0, 12)
-    ctx.quadraticCurveTo(-16, 10, -16, -14)
-    ctx.fill()
-    ctx.strokeStyle = '#ffd24a'
-    ctx.lineWidth = 5
-    ctx.beginPath()
-    ctx.arc(-18, -6, 8, Math.PI * 0.5, Math.PI * 1.6)
-    ctx.stroke()
-    ctx.beginPath()
-    ctx.arc(18, -6, 8, Math.PI * 1.4, Math.PI * 0.5)
-    ctx.stroke()
-    ctx.fillRect(-4, 12, 8, 10)
-    this.roundRect(ctx, -14, 22, 28, 8, 3)
-    ctx.fill()
-    ctx.fillStyle = '#fff3b0'
-    ctx.font = 'bold 14px system-ui, sans-serif'
-    ctx.textAlign = 'center'
-    ctx.fillText('★', 0, 2)
-    // spinning shine
-    ctx.strokeStyle = 'rgba(255,255,255,0.85)'
-    ctx.lineWidth = 2.5
-    ctx.beginPath()
-    ctx.arc(0, 0, 24, this.time * 3, this.time * 3 + 0.9)
-    ctx.stroke()
-    ctx.restore()
-    if (Math.random() < 0.15 * this.particleMul) {
-      this.pushParticle({
-        x: tx + (Math.random() * 50 - 25),
-        y: ty + (Math.random() * 40 - 20),
-        vx: 0,
-        vy: -25,
-        life: 0,
-        max: 0.6,
-        size: 2.5,
-        color: '#fff3b0',
-        grav: 0,
-      })
+    // trophy with spinning shine (practice has no finish — play until R)
+    if (!this.practiceMode) {
+      const t = def.trophy
+      const bob = Math.sin(this.time * 3) * 6
+      const tx = t.x
+      const ty = t.y - 34 + bob
+      ctx.save()
+      ctx.translate(tx, ty)
+      ctx.fillStyle = '#ffd24a'
+      ctx.beginPath()
+      ctx.moveTo(-16, -14)
+      ctx.lineTo(16, -14)
+      ctx.quadraticCurveTo(16, 10, 0, 12)
+      ctx.quadraticCurveTo(-16, 10, -16, -14)
+      ctx.fill()
+      ctx.strokeStyle = '#ffd24a'
+      ctx.lineWidth = 5
+      ctx.beginPath()
+      ctx.arc(-18, -6, 8, Math.PI * 0.5, Math.PI * 1.6)
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.arc(18, -6, 8, Math.PI * 1.4, Math.PI * 0.5)
+      ctx.stroke()
+      ctx.fillRect(-4, 12, 8, 10)
+      this.roundRect(ctx, -14, 22, 28, 8, 3)
+      ctx.fill()
+      ctx.fillStyle = '#fff3b0'
+      ctx.font = 'bold 14px system-ui, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText('★', 0, 2)
+      // spinning shine
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)'
+      ctx.lineWidth = 2.5
+      ctx.beginPath()
+      ctx.arc(0, 0, 24, this.time * 3, this.time * 3 + 0.9)
+      ctx.stroke()
+      ctx.restore()
+      if (Math.random() < 0.15 * this.particleMul) {
+        this.pushParticle({
+          x: tx + (Math.random() * 50 - 25),
+          y: ty + (Math.random() * 40 - 20),
+          vx: 0,
+          vy: -25,
+          life: 0,
+          max: 0.6,
+          size: 2.5,
+          color: '#fff3b0',
+          grav: 0,
+        })
+      }
+      ctx.fillStyle = '#7a4b1a'
+      ctx.font = 'bold 16px system-ui, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText(`+${fmt(def.reward)} WINS!`, tx, t.y - 90)
     }
-    ctx.fillStyle = '#7a4b1a'
-    ctx.font = 'bold 16px system-ui, sans-serif'
-    ctx.textAlign = 'center'
-    ctx.fillText(this.practiceMode ? '🏁 FINISH' : `+${fmt(def.reward)} WINS!`, tx, t.y - 90)
 
     ctx.fillStyle = '#7a6a55'
     ctx.font = 'bold 14px system-ui, sans-serif'
-    ctx.fillText('START (R = exit)', def.start.x + 60, 580)
+    ctx.fillText(
+      this.practiceMode ? 'START — endless drills (R = exit)' : 'START (R = exit)',
+      def.start.x + 60,
+      580,
+    )
 
     // section labels (practice drills)
     if (def.labels) {

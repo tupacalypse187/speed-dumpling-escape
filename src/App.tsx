@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Game, type HudState, type ToastEvent } from './game/game'
 import {
-  clearSave,
+  SLOT_COUNT,
+  deleteSlot,
   fmtTime,
+  getActiveSlot,
   hasSave,
   loadSave,
+  renameSlot,
+  setActiveSlot,
+  slotName,
+  slotSummary,
   storeSave,
   type SaveData,
   type Settings,
@@ -38,6 +44,8 @@ const INITIAL_HUD: HudState = {
   obbyReward: null,
   obbyTime: null,
   obbyBest: null,
+  obbyGoals: null,
+  obbyMedals: null,
   practice: null,
   readyMult: null,
   lockedMult: { mult: 2, wins: 3 },
@@ -53,6 +61,10 @@ export default function App() {
   const [screen, setScreen] = useState<'title' | 'game'>('title')
   const [save, setSave] = useState<SaveData>(() => loadSave())
   const [saveExists, setSaveExists] = useState(() => hasSave())
+  const [activeSlot, setActiveSlotState] = useState(() => getActiveSlot())
+  const [showSlots, setShowSlots] = useState(
+    () => !Array.from({ length: SLOT_COUNT }, (_, i) => hasSave(i + 1)).some(Boolean),
+  )
   const [hud, setHud] = useState<HudState>(INITIAL_HUD)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [showTrophy, setShowTrophy] = useState(false)
@@ -102,11 +114,19 @@ export default function App() {
 
   const handlePlay = useCallback(() => setScreen('game'), [])
 
-  const handleReset = useCallback(() => {
-    if (window.confirm('Reset your save? All progress, pets, coins and records will be lost!')) {
-      clearSave()
-      location.reload()
-    }
+  const handleSelectSlot = useCallback((n: number) => {
+    setActiveSlot(n)
+    setActiveSlotState(n)
+    setSave(loadSave(n))
+    setSaveExists(hasSave(n))
+    setShowSlots(false)
+  }, [])
+
+  const refreshSlot = useCallback(() => {
+    const n = getActiveSlot()
+    setActiveSlotState(n)
+    setSave(loadSave(n))
+    setSaveExists(hasSave(n))
   }, [])
 
   /** Equip works both in-game (through Game) and on the title screen (direct save edit). */
@@ -129,14 +149,23 @@ export default function App() {
   if (screen === 'title') {
     return (
       <>
-        <TitleScreen
-          save={save}
-          saveExists={saveExists}
-          onPlay={handlePlay}
-          onReset={handleReset}
-          onTrophy={() => setShowTrophy(true)}
-          onPets={() => setShowPets(true)}
-        />
+        {showSlots ? (
+          <SlotPicker
+            activeSlot={activeSlot}
+            onSelect={handleSelectSlot}
+            onChanged={refreshSlot}
+          />
+        ) : (
+          <TitleScreen
+            save={save}
+            saveExists={saveExists}
+            slotLabel={`Slot ${activeSlot} · ${slotName(activeSlot)}`}
+            onPlay={handlePlay}
+            onSwitchSlots={() => setShowSlots(true)}
+            onTrophy={() => setShowTrophy(true)}
+            onPets={() => setShowPets(true)}
+          />
+        )}
         {showTrophy && <TrophyRoom save={save} onClose={() => setShowTrophy(false)} />}
         {showPets && <PetsPanel save={save} onEquip={handleEquipPet} onClose={() => setShowPets(false)} />}
       </>
@@ -171,7 +200,11 @@ export default function App() {
             gameRef.current?.exitToHub()
             setPaused(false)
           }}
-          onReset={handleReset}
+          onQuitToTitle={() => {
+            setScreen('title') // effect cleanup destroys the game, which flushes the save
+            setPaused(false)
+            window.setTimeout(refreshSlot, 0) // after the game's destroy() flush
+          }}
         />
       )}
     </div>
@@ -204,12 +237,13 @@ function ToastStack({ toasts }: { toasts: Toast[] }) {
 function TitleScreen(props: {
   save: SaveData
   saveExists: boolean
+  slotLabel: string
   onPlay: () => void
-  onReset: () => void
+  onSwitchSlots: () => void
   onTrophy: () => void
   onPets: () => void
 }) {
-  const { save, saveExists, onPlay, onReset, onTrophy, onPets } = props
+  const { save, saveExists, slotLabel, onPlay, onSwitchSlots, onTrophy, onPets } = props
   const pet = petById(save.equippedPet)
   return (
     <div className="fixed inset-0 overflow-y-auto bg-gradient-to-b from-[#ffd9a8] via-[#ffe6ef] to-[#ffeef4]">
@@ -262,17 +296,21 @@ function TitleScreen(props: {
           </button>
         </div>
 
+        <button
+          onClick={onSwitchSlots}
+          className="rounded-xl bg-white/70 px-4 py-2 text-sm font-black text-[#7a3b2e] shadow transition-transform hover:scale-105"
+        >
+          💾 {slotLabel} — switch save
+        </button>
+
         {saveExists && (save.speed > 0 || save.wins > 0 || save.rebirths > 0) && (
           <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl bg-white/70 px-5 py-2 text-sm font-bold text-[#7a3b2e] shadow">
             <span>⚡ {fmt(save.speed)}</span>
             <span>🏆 {fmt(save.wins)}</span>
             <span>🪙 {fmt(save.coins)}</span>
             <span>🌀 {save.rebirths}</span>
+            <span>🎖️ {Object.values(save.medals).reduce((a, b) => a + b, 0)}</span>
             <span>⏱️ {fmtTime(save.totalPlayTime)}</span>
-            <span>🎖️ {save.achievements.length}/{ACHIEVEMENTS.length}</span>
-            <button onClick={onReset} className="ml-1 rounded-lg bg-[#e0e0e8] px-3 py-1 text-xs font-bold text-[#666] hover:bg-[#d0d0da]">
-              Reset save
-            </button>
           </div>
         )}
 
@@ -290,10 +328,11 @@ function TitleScreen(props: {
           <div className="rounded-2xl bg-white/80 p-5 shadow-lg">
             <h2 className="mb-2 text-lg font-black text-[#7a3b2e]">📈 How to play</h2>
             <ul className="space-y-1 text-sm font-semibold text-[#8a6a55]">
-              <li>🏃 Run treadmills for speed; levels are <b>infinite</b> (×2.2 each past Lv 4)</li>
-              <li>✨ Milestone skins: Lv 5 Sparkle · Lv 10 Flame · Lv 15 Rainbow · Lv 20 Galaxy</li>
+              <li>🎢 <b>Ride treadmills</b> for +25⚡ × your full multiplier — the fast path</li>
+              <li>🏃 Grass running ticks too, but capped at ×3 gain</li>
+              <li>🥉🥈🥇 Earn 3 medals per obby (finish · 🥈 target · 🥇 stretch) to unlock the next door</li>
               <li>🚪 Infinite obbies — Obby 4+ generated forever (e.g. Obby 6: +{generatedObbyReward(6)}🏆), grab 🪙 on the way</li>
-              <li>🌀 <b>Rebirth at Lv 5</b> for permanent ×2 speed gain · 🐾 unlock pets for passive bonuses</li>
+              <li>🌀 <b>Rebirth at Lv 5</b> for permanent ×2 gain · 🐾 pets give passive bonuses · 🎯 practice is endless</li>
               <li>🛒 Spend coins at the hub shop on hats, trails & speed charms</li>
             </ul>
           </div>
@@ -360,12 +399,25 @@ function Hud(props: {
           <div className="flex items-center gap-2 rounded-xl bg-[#7d6fd0]/80 px-3 py-1.5 text-sm font-black text-white backdrop-blur-sm">
             {hud.obbyId === -2 ? (
               <span>
-                🎯 Practice — drills {hud.practice?.done ?? 0}/{hud.practice?.total ?? 0} · free play, no rewards
+                🎯 Practice — Segment {hud.practice?.segment ?? 0} · {hud.practice?.checkpoints ?? 0} checkpoints ·
+                free play
               </span>
             ) : hud.obbyId === -1 ? (
               <span>⭐ Weekly Challenge — finish for big 🪙 (+2 🏆)</span>
             ) : (
               <span>{hud.obbyName} — reach the trophy! (+{fmt(hud.obbyReward ?? 0)} 🏆)</span>
+            )}
+            {hud.obbyGoals && (
+              <span className="rounded-lg bg-black/30 px-2 py-0.5 text-xs tabular-nums">
+                🥈 {fmtTime(hud.obbyGoals.target)} · 🥇 {fmtTime(hud.obbyGoals.stretch)}
+              </span>
+            )}
+            {hud.obbyMedals != null && (
+              <span className="text-xs">
+                {['🥉', '🥈', '🥇'].map((m, i) => (
+                  <span key={m} style={{ opacity: i < (hud.obbyMedals ?? 0) ? 1 : 0.25 }}>{m}</span>
+                ))}
+              </span>
             )}
             <span className="rounded-lg bg-black/30 px-2 py-0.5 tabular-nums">
               ⏱ {hud.obbyTime != null ? fmtTime(hud.obbyTime) : '0.0s'}
@@ -430,7 +482,9 @@ function Hud(props: {
       </div>
 
       <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/30 px-4 py-1.5 text-xs font-bold text-white/85 backdrop-blur-sm">
-        A/D move · Space jump · E interact · Tab pets · Esc pause{hud.mode === 'obby' ? ' · R exit obby' : ''}
+        {hud.mode === 'obby'
+          ? 'A/D move · Space jump · R exit obby'
+          : 'A/D move · Space jump · E interact · 🎢 ride belts +25⚡ · grass ticks ≤×3 · Esc pause'}
       </div>
     </>
   )
@@ -629,9 +683,9 @@ function PauseMenu(props: {
   onSettings: (s: Settings) => void
   onResume: () => void
   onHub: () => void
-  onReset: () => void
+  onQuitToTitle: () => void
 }) {
-  const { settings, onSettings, onResume, onHub, onReset } = props
+  const { settings, onSettings, onResume, onHub, onQuitToTitle } = props
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="w-[380px] rounded-3xl bg-[#fff8ef] p-6 shadow-2xl">
@@ -695,8 +749,8 @@ function PauseMenu(props: {
             </button>
           </div>
         </div>
-        <button onClick={onReset} className="w-full rounded-xl bg-[#e0e0e8] py-2 text-xs font-black text-[#a04444] hover:bg-[#d5d5e0]">
-          🗑 Reset save
+        <button onClick={onQuitToTitle} className="w-full rounded-xl bg-[#e0e0e8] py-2 text-xs font-black text-[#7a5a45] hover:bg-[#d5d5e0]">
+          💾 Save & quit to title
         </button>
       </div>
     </div>
@@ -729,19 +783,29 @@ function TrophyRoom({ save, onClose }: { save: SaveData; onClose: () => void }) 
           <Stat icon="⏱️" label="Play time" value={fmtTime(save.totalPlayTime)} />
         </div>
 
-        <h3 className="mb-2 text-base font-black text-[#7a3b2e]">⏱️ Best obby times</h3>
+        <h3 className="mb-2 text-base font-black text-[#7a3b2e]">🎖️ Obby medals & best times</h3>
         {bestEntries.length === 0 ? (
           <p className="mb-4 rounded-xl bg-white/70 p-3 text-sm font-semibold text-[#9a6a4f]">
             No obbies completed yet — get out there, dumpling!
           </p>
         ) : (
           <div className="mb-4 grid grid-cols-2 gap-2">
-            {bestEntries.map((e) => (
-              <div key={e.id} className="flex items-center justify-between rounded-xl bg-white/80 px-3 py-2 text-sm font-bold text-[#7a5a45] shadow-sm">
-                <span>Obby {e.id}</span>
-                <span className="tabular-nums text-[#2f9e44]">{fmtTime(e.t)}</span>
-              </div>
-            ))}
+            {bestEntries.map((e) => {
+              const medals = save.medals[String(e.id)] ?? 0
+              return (
+                <div key={e.id} className="flex items-center justify-between rounded-xl bg-white/80 px-3 py-2 text-sm font-bold text-[#7a5a45] shadow-sm">
+                  <span>
+                    Obby {e.id}{' '}
+                    <span className="ml-0.5">
+                      {['🥉', '🥈', '🥇'].map((m, i) => (
+                        <span key={m} style={{ opacity: i < medals ? 1 : 0.22 }}>{m}</span>
+                      ))}
+                    </span>
+                  </span>
+                  <span className="tabular-nums text-[#2f9e44]">{fmtTime(e.t)}</span>
+                </div>
+              )
+            })}
           </div>
         )}
 
@@ -807,6 +871,116 @@ function WeeklySection({ weeklyBest }: { weeklyBest: Record<string, number> }) {
           <span className="tabular-nums text-[#2f9e44]">{fmtTime(t)}</span>
         </div>
       ))}
+    </div>
+  )
+}
+
+/* ---------------- Save slots ---------------- */
+
+function SlotPicker(props: {
+  activeSlot: number
+  onSelect: (n: number) => void
+  onChanged: () => void
+}) {
+  const { activeSlot, onSelect, onChanged } = props
+  const [tick, setTick] = useState(0)
+  void tick // re-render trigger after rename/delete
+  const summaries = Array.from({ length: SLOT_COUNT }, (_, i) => slotSummary(i + 1))
+
+  const handleDelete = (n: number, name: string) => {
+    if (window.confirm(`Delete "${name}" (Slot ${n})? All progress in this slot will be lost!`)) {
+      deleteSlot(n)
+      onChanged()
+      setTick((t) => t + 1)
+    }
+  }
+
+  const handleRename = (n: number, value: string) => {
+    renameSlot(n, value)
+    onChanged()
+    setTick((t) => t + 1)
+  }
+
+  return (
+    <div className="fixed inset-0 overflow-y-auto bg-gradient-to-b from-[#ffd9a8] via-[#ffe6ef] to-[#ffeef4]">
+      <div className="mx-auto flex min-h-full max-w-4xl flex-col items-center justify-center gap-6 px-6 py-10">
+        <div className="text-center">
+          <div className="text-6xl">💾</div>
+          <h1 className="mt-2 text-4xl font-black tracking-tight text-[#7a3b2e]">CHOOSE YOUR SAVE</h1>
+          <p className="mt-2 text-sm font-semibold text-[#9a6a4f]">
+            Up to {SLOT_COUNT} dumplings per browser — each slot keeps its own progress.
+          </p>
+        </div>
+        <div className="grid w-full gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {summaries.map((s) => (
+            <div
+              key={`${s.slot}-${tick}`}
+              className={`flex flex-col gap-3 rounded-2xl p-5 shadow-lg ${
+                s.slot === activeSlot && s.exists ? 'bg-[#fff3c9] ring-2 ring-[#ffd24a]' : 'bg-white/80'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-black uppercase tracking-wide text-[#b08a70]">
+                  Slot {s.slot}
+                </span>
+                {s.slot === activeSlot && s.exists && (
+                  <span className="rounded-full bg-[#ffd24a] px-2 py-0.5 text-[10px] font-black text-[#7a4b1a]">
+                    ACTIVE
+                  </span>
+                )}
+              </div>
+              {s.exists ? (
+                <>
+                  <input
+                    defaultValue={s.name}
+                    maxLength={24}
+                    onBlur={(e) => handleRename(s.slot, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                    }}
+                    className="w-full rounded-lg border border-[#e8d8c8] bg-white px-3 py-1.5 text-base font-black text-[#7a3b2e] outline-none focus:border-[#ffb26b]"
+                    aria-label={`Rename slot ${s.slot}`}
+                  />
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs font-bold text-[#8a6a55]">
+                    <span>📶 Lv {s.level}</span>
+                    <span>🏆 {fmt(s.wins)}</span>
+                    <span>🎖️ {s.medals}</span>
+                    <span>🌀 {s.rebirths}</span>
+                    <span>⏱️ {fmtTime(s.playTime)}</span>
+                  </div>
+                  <div className="mt-auto flex gap-2">
+                    <button
+                      onClick={() => onSelect(s.slot)}
+                      className="flex-1 rounded-xl bg-[#ff5a5f] py-2 text-sm font-black text-white shadow-[0_3px_0_#c93b40] transition-transform hover:scale-[1.02] active:translate-y-0.5"
+                    >
+                      ▶ Load
+                    </button>
+                    <button
+                      onClick={() => handleDelete(s.slot, s.name)}
+                      className="rounded-xl bg-[#e0e0e8] px-3 py-2 text-sm font-black text-[#a04444] hover:bg-[#d5d5e0]"
+                      title="Delete this save"
+                    >
+                      🗑
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="py-2 text-center text-sm font-bold text-[#b08a70]">
+                    Empty — New Game
+                  </div>
+                  <button
+                    onClick={() => onSelect(s.slot)}
+                    className="mt-auto rounded-xl bg-[#8be06a] py-2 text-sm font-black text-white shadow-[0_3px_0_#5da843] transition-transform hover:scale-[1.02] active:translate-y-0.5"
+                  >
+                    ✨ Start here
+                  </button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }

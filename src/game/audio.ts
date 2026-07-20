@@ -187,6 +187,13 @@ export class AudioManager {
     )
   }
 
+  /** Treadmill drop-off: airy whoosh sweep + a bright ding. */
+  whoosh(): void {
+    this.tone({ freq: 1600, freqEnd: 300, dur: 0.35, type: 'sawtooth', vol: 0.1, attack: 0.04 })
+    this.tone({ freq: 800, freqEnd: 200, dur: 0.3, type: 'triangle', vol: 0.14, attack: 0.03 })
+    this.tone({ freq: 1976, dur: 0.14, type: 'sine', vol: 0.2, when: 0.22 })
+  }
+
   /** Rebirth ceremony: deep gong + sustained choir chord. */
   ceremony(): void {
     // gong: low fundamental + inharmonic partials, long decay

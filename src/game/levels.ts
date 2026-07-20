@@ -106,6 +106,28 @@ export function runSpeedFor(speed: number): number {
   return Math.min(2200, 240 + speed * 1.2)
 }
 
+export interface MedalTimes {
+  /** 🥈 target: comfortable run at the required level's speed + 15% slack. */
+  target: number
+  /** 🥇 stretch: clean run at the required level's speed + 5% slack. */
+  stretch: number
+}
+
+/**
+ * Medal time goals for an obby: end-to-end distance over the run speed
+ * available at its required level. 🥉 is awarded for any completion.
+ */
+export function medalTimes(def: ObbyDef): MedalTimes {
+  const base = def.width / runSpeedFor(levelThreshold(def.reqLevel))
+  return { target: base * 1.15, stretch: base * 1.05 }
+}
+
+/** Medals earned for a run time (0–3): finish + target + stretch. */
+export function medalsForTime(def: ObbyDef, runTime: number): number {
+  const m = medalTimes(def)
+  return 1 + (runTime <= m.target ? 1 : 0) + (runTime <= m.stretch ? 1 : 0)
+}
+
 // ---- shared world/physics constants (used by game + generator) ----
 
 export const GRAV = 2400
@@ -370,12 +392,12 @@ export const PRACTICE_OBBY: ObbyDef = {
     { x: 3920, y: 560, w: 240, h: 32 },
     { x: 4300, y: 620, w: 320, h: 40 }, // checkpoint 3
     // pad drill
-    { x: 5640, y: 620, w: 520, h: 40 }, // checkpoint 4 + trophy
+    { x: 5580, y: 620, w: 520, h: 40 }, // checkpoint 4 + trophy
   ],
   pads: [
-    { x: 4760, y: 570, w: 220, h: 26, phase: 0.4, speed: 1.4 },
-    { x: 5040, y: 540, w: 220, h: 26, phase: 2.2, speed: 1.6 },
-    { x: 5320, y: 580, w: 220, h: 26, phase: 4.1, speed: 1.3 },
+    { x: 4700, y: 570, w: 220, h: 26, phase: 0.4, speed: 1.4 },
+    { x: 4970, y: 540, w: 220, h: 26, phase: 2.2, speed: 1.6 },
+    { x: 5240, y: 580, w: 220, h: 26, phase: 4.1, speed: 1.3 },
   ],
   movers: [
     { x: 2050, y: 560, w: 120, h: 24, axis: 'x', range: 120, speed: 1.5 },
